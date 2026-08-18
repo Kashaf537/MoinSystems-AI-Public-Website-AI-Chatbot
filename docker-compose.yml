@@ -1,0 +1,21 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: moinsystems-chatbot-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: moin
+      POSTGRES_PASSWORD: moin
+      POSTGRES_DB: moinsystems_chatbot
+    ports:
+      - "5432:5432"
+    volumes:
+      - moinsystems_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U moin -d moinsystems_chatbot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  moinsystems_pgdata:
