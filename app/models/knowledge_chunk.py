@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from app.models.knowledge_document import KnowledgeDocument
 
 
-EMBEDDING_DIM = 1536
+EMBEDDING_DIM = 384
 
 
 class KnowledgeChunk(Base):

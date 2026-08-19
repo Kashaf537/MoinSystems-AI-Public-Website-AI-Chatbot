@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    APP_NAME: str = "# MoinSystems AI Public Website AI Chatbot"
+    APP_NAME: str = "MoinSystems AI Public Website AI Chatbot"
     APP_ENV: str = "local"
     DEBUG: bool = True
 
@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str | None = None
     ANTHROPIC_API_KEY: str | None = None
 
-    EMBEDDING_MODEL: str = "text-embedding-3-small"
+    EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
 
     ALLOWED_ORIGINS: str = "http://localhost:3000"
 
