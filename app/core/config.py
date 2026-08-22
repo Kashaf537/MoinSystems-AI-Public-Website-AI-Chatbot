@@ -31,6 +31,17 @@ class Settings(BaseSettings):
     LLM_MAX_TOKENS: int = 500
 
     # =========================================================
+    #              Email / SMTP
+    # =========================================================
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str
+    SMTP_PASSWORD: str
+    EMAIL_FROM: str
+    EMAIL_TO: str = "info@moinsystemsai.com"
+    EMAIL_TIMEOUT: int = 15
+
+    # =========================================================
     # Embeddings
     # =========================================================
 

@@ -1,6 +1,5 @@
-
 """
-Day 5 - Chat API route.
+Day 5 + Day 6 - Chat API route.
 
 Handles:
 - Server-side session validation
@@ -10,17 +9,34 @@ Handles:
 - Lead capture state machine
 - Answer-first behavior
 - Server-side lead validation
+- Day 6 lead email notification
+- False-success prevention
+- Day 6 rate limiting
+- Provider quota/rate-limit handling
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Request,
+)
+
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
 from app.schemas.chat import ChatRequest, ChatResponse
+
 from app.services.chat_service import ChatService
 from app.services.intent_service import IntentService
 from app.services.lead_capture_service import LeadCaptureService
+from app.services.notification_service import NotificationService
 from app.services.session_service import SessionService
+
+from app.core.rate_limiter import (
+    RateLimitExceeded,
+    rate_limiter,
+)
 
 
 router = APIRouter(
@@ -44,6 +60,7 @@ def get_db():
 )
 def chat(
     request: ChatRequest,
+    request_obj: Request,
     db: Session = Depends(get_db),
 ) -> ChatResponse:
 
@@ -61,6 +78,44 @@ def chat(
             status_code=404,
             detail="Session not found.",
         )
+
+    # =========================================================
+    # 1.1 Day 6 - Rate limiting
+    # =========================================================
+    #
+    # Apply both:
+    # - Per-IP limiting
+    # - Per-session limiting
+    #
+    # This protects the LLM-backed endpoint from abuse.
+    # =========================================================
+
+    client_ip = (
+        request_obj.client.host
+        if request_obj.client
+        else "unknown"
+    )
+
+    try:
+
+        rate_limiter.check(
+            ip_address=client_ip,
+            session_id=str(request.session_id),
+        )
+
+    except RateLimitExceeded as exc:
+
+        raise HTTPException(
+            status_code=429,
+            detail=exc.message,
+            headers={
+                "Retry-After": "60",
+            },
+        )
+
+    # =========================================================
+    # 1.2 Validate message
+    # =========================================================
 
     message = request.message.strip()
 
@@ -93,10 +148,6 @@ def chat(
 
     # =========================================================
     # 4. Lead-capture state machine
-    #
-    # IMPORTANT:
-    # Once lead capture has started, the state machine gets
-    # priority over RAG/LLM.
     # =========================================================
 
     if session.lead_state in {
@@ -109,12 +160,11 @@ def chat(
             session
         )
 
-        # -----------------------------------------------------
-        # Check whether this message is actually an attempt
-        # to answer the currently requested field.
-        # -----------------------------------------------------
-
         should_process = False
+
+        # =====================================================
+        # Full name
+        # =====================================================
 
         if current_field == "full_name":
 
@@ -136,9 +186,19 @@ def chat(
                 )
             )
 
+        # =====================================================
+        # Email
+        # =====================================================
+
         elif current_field == "email":
 
-            should_process = "@" in message
+            # Always pass the value to the validation service.
+            # Do not perform weak frontend-style validation here.
+            should_process = True
+
+        # =====================================================
+        # Contact number
+        # =====================================================
 
         elif current_field == "contact_number":
 
@@ -150,10 +210,9 @@ def chat(
 
             should_process = len(digits) >= 7
 
-        # -----------------------------------------------------
-        # If the user is clearly answering the requested field,
-        # process it through the deterministic state machine.
-        # -----------------------------------------------------
+        # =====================================================
+        # Process lead field
+        # =====================================================
 
         if should_process:
 
@@ -164,9 +223,9 @@ def chat(
                 )
             )
 
-            # -------------------------------------------------
+            # =================================================
             # Invalid field
-            # -------------------------------------------------
+            # =================================================
 
             if not valid:
 
@@ -191,22 +250,95 @@ def chat(
                     lead_capture_required=True,
                 )
 
-            # -------------------------------------------------
+            # =================================================
             # All required fields collected
-            # -------------------------------------------------
+            # =================================================
 
             if session.lead_state == "COMPLETE":
 
-                LeadCaptureService.create_lead(
+                # -------------------------------------------------
+                # Create lead
+                # -------------------------------------------------
+
+                lead = LeadCaptureService.create_lead(
                     db=db,
                     session=session,
                 )
 
+                if not lead:
+
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Unable to create lead submission.",
+                    )
+
+                # -------------------------------------------------
+                # Day 6 - Send notification
+                # -------------------------------------------------
+
+                try:
+
+                    notification_result = (
+                        NotificationService.send_lead_notification(
+                            db=db,
+                            lead=lead,
+                        )
+                    )
+
+                except Exception as exc:
+
+                    print(
+                        f"Lead notification error: {exc}"
+                    )
+
+                    notification_result = None
+
+                # =================================================
+                # Notification SUCCESS
+                # =================================================
+
+                if (
+                    notification_result
+                    and notification_result.success
+                ):
+
+                    response_text = (
+                        "Thank you. I have all the required "
+                        "details and your information has been "
+                        "submitted successfully. Our team will "
+                        "follow up with you regarding your project."
+                    )
+
+                    SessionService.add_message(
+                        db=db,
+                        session=session,
+                        role="assistant",
+                        content=response_text,
+                        intent=intent,
+                        lead_state="COMPLETE",
+                    )
+
+                    db.commit()
+
+                    return ChatResponse(
+                        response=response_text,
+                        provider="state_machine",
+                        model="none",
+                        session_id=session.id,
+                        intent=intent,
+                        lead_state="COMPLETE",
+                        lead_capture_required=False,
+                    )
+
+                # =================================================
+                # Notification FAILURE
+                # =================================================
+
                 response_text = (
-                    "Thank you. I have all the required "
-                    "details and your information has been "
-                    "captured successfully. Our team can "
-                    "follow up with you regarding your project."
+                    "Thank you. I have securely saved the details "
+                    "you provided, but I was unable to complete "
+                    "the notification to our team right now. "
+                    "Please try submitting again later."
                 )
 
                 SessionService.add_message(
@@ -230,12 +362,9 @@ def chat(
                     lead_capture_required=False,
                 )
 
-            # -------------------------------------------------
-            # Field accepted.
-            #
-            # Ask for the next required field immediately.
-            # Do NOT call RAG/LLM for this.
-            # -------------------------------------------------
+            # =================================================
+            # Field accepted
+            # =================================================
 
             next_field = LeadCaptureService.next_field(
                 session
@@ -268,13 +397,9 @@ def chat(
                 lead_capture_required=True,
             )
 
-        # -----------------------------------------------------
-        # User is currently in lead capture but their message
-        # does NOT look like an answer to the requested field.
-        #
-        # Do NOT send it to the LLM.
-        # Remind them which field is required.
-        # -----------------------------------------------------
+        # =====================================================
+        # User did not answer requested field
+        # =====================================================
 
         response_text = LeadCaptureService.question_for(
             current_field
@@ -309,10 +434,6 @@ def chat(
 
         service = ChatService(db)
 
-        # -----------------------------------------------------
-        # Get recent server-side conversation history
-        # -----------------------------------------------------
-
         recent_messages = (
             SessionService.get_recent_messages(
                 db=db,
@@ -333,17 +454,12 @@ def chat(
             }
         ]
 
-        # Current message is already saved above.
-        # ChatService adds it itself.
+        # Current message already saved above.
         if (
             history
             and history[-1]["role"] == "user"
         ):
             history = history[:-1]
-
-        # -----------------------------------------------------
-        # Generate grounded response
-        # -----------------------------------------------------
 
         result = service.generate_response(
             message=message,
@@ -356,6 +472,10 @@ def chat(
 
     except ValueError as exc:
 
+        # -----------------------------------------------------
+        # Validation / application-level errors
+        # -----------------------------------------------------
+
         raise HTTPException(
             status_code=400,
             detail=str(exc),
@@ -363,9 +483,51 @@ def chat(
 
     except Exception as exc:
 
+        # -----------------------------------------------------
+        # Provider / generation error handling
+        # -----------------------------------------------------
+        #
+        # Gemini may return errors such as:
+        #
+        #   429 RESOURCE_EXHAUSTED
+        #   quota exceeded
+        #   rate limit exceeded
+        #
+        # These should NOT become HTTP 500 because they represent
+        # temporary provider capacity/quota problems.
+        # -----------------------------------------------------
+
+        error_text = str(exc)
+
         print(
-            f"Chat generation error: {exc}"
+            f"Chat generation error: {error_text}"
         )
+
+        # =====================================================
+        # Provider quota / rate-limit error
+        # =====================================================
+
+        if (
+            "429" in error_text
+            or "RESOURCE_EXHAUSTED" in error_text
+            or "quota" in error_text.lower()
+            or "rate limit" in error_text.lower()
+        ):
+
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "The AI service is temporarily at capacity. "
+                    "Please try again shortly."
+                ),
+                headers={
+                    "Retry-After": "30",
+                },
+            )
+
+        # =====================================================
+        # Other generation/provider errors
+        # =====================================================
 
         raise HTTPException(
             status_code=500,
@@ -373,9 +535,7 @@ def chat(
         )
 
     # =========================================================
-    # 6. Start lead capture after answering the question
-    #
-    # This preserves Day 5 "answer-first" behavior.
+    # 6. Start lead capture after answering
     # =========================================================
 
     if (
@@ -432,4 +592,3 @@ def chat(
             }
         ),
     )
-
