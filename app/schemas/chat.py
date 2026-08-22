@@ -1,55 +1,46 @@
-"""
-Day 4 - Chat API request and response schemas.
-"""
+import uuid
 
 from pydantic import BaseModel, Field
 
 
-class ChatMessage(BaseModel):
-    """Single conversation message."""
+class HistoryMessage(BaseModel):
 
-    role: str = Field(
-        ...,
-        pattern="^(user|assistant)$",
-    )
+    role: str
 
-    content: str = Field(
-        ...,
-        min_length=1,
-        max_length=10000,
-    )
+    content: str
 
 
 class ChatRequest(BaseModel):
-    """Request body for the chat endpoint."""
+
+    session_id: uuid.UUID
 
     message: str = Field(
-        ...,
         min_length=1,
-        max_length=10000,
+        max_length=4000,
     )
 
-    history: list[ChatMessage] = Field(
+    history: list[HistoryMessage] = Field(
         default_factory=list,
-        max_length=20,
+        max_length=6,
     )
 
-    intent: str | None = Field(
-        default=None,
-        max_length=100,
-    )
+    intent: str | None = None
 
-    lead_state: str | None = Field(
-        default=None,
-        max_length=100,
-    )
+    lead_state: str | None = None
 
 
 class ChatResponse(BaseModel):
-    """Structured chat response."""
 
     response: str
 
     provider: str
 
     model: str
+
+    session_id: uuid.UUID
+
+    intent: str
+
+    lead_state: str
+
+    lead_capture_required: bool = False
